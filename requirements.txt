@@ -1,3 +1,8 @@
 fastapi
 uvicorn
 gunicorn
+requests
+pillow
+numpy
+torch --index-url https://download.pytorch.org/crt/cpu
+torchvision --index-url https://download.pytorch.org/crt/cpu
