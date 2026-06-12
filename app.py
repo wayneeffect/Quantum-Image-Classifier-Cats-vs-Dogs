@@ -1,88 +1,79 @@
 import io
-import time
+import asyncio
+import httpx
 from fastapi import FastAPI, HTTPException, File, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
-import requests
 from pipeline import QMLPipeline
 
 app = FastAPI()
+
+# Enable CORS so your frontend UI service doesn't block request validation
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 pipeline = QMLPipeline()
 
+# Non-blocking asynchronous HTTP client with built-in connection pooling
+async_http_client = httpx.AsyncClient(timeout=45.0)
 
-def call_quantum_oracle_with_retry(
-    hamiltonian: list[list[float]], max_retries: int = 3, backoff_factor: int = 2
-) -> dict:
-    """Dispatches the Hamiltonian matrix to the external oracle with exponential backoff handling
-
-    for HTTP 429 Rate Limiting.
-    """
+async def call_quantum_oracle_async(hamiltonian: list[list[float]], max_retries: int = 3, backoff_factor: int = 2) -> dict:
+    """Dispatches the Hamiltonian matrix asynchronously with non-blocking backoff intervals."""
     url = "https://grok-wayne-s-quantum-algorithm.onrender.com/hybrid_vqe_qaoa"
     payload = {"hamiltonian": hamiltonian, "parameters": [0.35, 0.72, 0.15]}
-    headers = {"Content-Type": "application/json"}
-
+    
     for attempt in range(max_retries):
         try:
-            response = requests.post(url, json=payload, headers=headers, timeout=30)
-
-            # If rate limited (429), calculate delay, pause execution, and loop back
+            response = await async_http_client.post(url, json=payload)
+            
+            # Non-blocking sleep if rate limited (429), keeping the worker process alive
             if response.status_code == 429:
-                sleep_time = backoff_factor**attempt
-                print(
-                    f"[Rate Limited] Status 429 encountered. Retrying attempt {attempt + 1}/{max_retries} in {sleep_time}s..."
-                )
-                time.sleep(sleep_time)
+                sleep_time = backoff_factor ** attempt
+                print(f"[Rate Limited] 429 Error. Asynchronously backing off for {sleep_time}s...")
+                await asyncio.sleep(sleep_time)
                 continue
-
+                
             if response.status_code != 200:
-                raise requests.exceptions.HTTPError(
-                    f"Oracle Error: {response.status_code}"
-                )
-
+                raise HTTPException(status_code=502, detail=f"External Quantum Oracle returned failure code {response.status_code}")
+                
             return response.json()
-
-        except requests.exceptions.RequestException as e:
-            # If it's our last attempt and we hit a network glitch, raise the exception up
+            
+        except httpx.RequestError as exc:
             if attempt == max_retries - 1:
-                raise e
-
-    raise requests.exceptions.RequestException(
-        "Failed to complete request after maximum rate-limit retries."
-    )
-
+                raise HTTPException(status_code=503, detail=f"Failed to communicate with Oracle infrastructure: {exc}")
+                
+    raise HTTPException(status_code=429, detail="Exceeded maximum automated quantum oracle dispatch retry windows.")
 
 @app.get("/")
 def health_check():
-    return {"status": "healthy", "pipeline": "Quantum Image Classifier"}
-
+    return {"status": "healthy", "pipeline": "Asynchronous Quantum Image Classifier"}
 
 @app.post("/classify")
 async def classify_image(file: UploadFile = File(...)):
     try:
-        # 1. Read the raw bytes directly from the Streamlit upload stream
         contents = await file.read()
-
-        # 2. Convert raw bytes into a PIL Image instance
+        
         try:
-            img = Image.open(io.BytesIO(contents)).convert("RGB")
+            img = Image.open(io.BytesIO(contents)).convert('RGB')
         except Exception:
-            raise HTTPException(
-                status_code=400,
-                detail="Uploaded file is not a valid or supported image format.",
-            )
+            raise HTTPException(status_code=400, detail="Uploaded file stream is unreadable or corrupted.")
 
-        # 3. Process via your existing QMLPipeline methods
+        # Run feature map allocations
         raw_features = pipeline.extract_classical_features(img)
-
-        # 4. Map down to the 4x4 matrix representation
         hamiltonian = pipeline.map_to_quantum_hamiltonian(raw_features, size=4)
-
-        # 5. Connect to the external Grok & Wayne Oracle using the retry safety wrapper
-        oracle_data = call_quantum_oracle_with_retry(
-            hamiltonian, max_retries=3, backoff_factor=2
-        )
-
+        
+        # Call the non-blocking retry loop 
+        oracle_data = await call_quantum_oracle_async(hamiltonian)
         return oracle_data
 
+    except HTTPException as http_exc:
+        raise http_exc
     except Exception as e:
-        # Catch internal pipeline exceptions or final network failures and send them to the UI
-        raise HTTPException(status_code=500, detail=str(e))
+        # Check if the process crashed due to RAM constraints
+        print(f"[CRITICAL ERROR ENCOUNTERED]: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal Core Pipeline Error: {str(e)}")
