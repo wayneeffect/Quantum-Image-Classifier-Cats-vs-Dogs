@@ -31,7 +31,7 @@ async def call_quantum_oracle_async(hamiltonian: list[list[float]], max_retries:
         try:
             response = await async_http_client.post(url, json=payload)
             
-            # Non-blocking sleep if rate limited (429), keeping the worker process alive
+            # Non-blocking sleep if rate limited (429), keeping the gateway alive
             if response.status_code == 429:
                 sleep_time = backoff_factor ** attempt
                 print(f"[Rate Limited] 429 Error. Asynchronously backing off for {sleep_time}s...")
@@ -74,6 +74,5 @@ async def classify_image(file: UploadFile = File(...)):
     except HTTPException as http_exc:
         raise http_exc
     except Exception as e:
-        # Check if the process crashed due to RAM constraints
         print(f"[CRITICAL ERROR ENCOUNTERED]: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal Core Pipeline Error: {str(e)}")
